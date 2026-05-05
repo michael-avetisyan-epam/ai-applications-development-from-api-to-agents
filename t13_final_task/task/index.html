@@ -597,12 +597,11 @@
 
     async function loadConversations() {
         try {
-            // TODO:
-            // Send a GET request to API_URL + "/conversations".
-            // Parse the JSON response body — it returns an array of conversation summary objects,
-            // each containing id, title, message_count, created_at, updated_at.
-            // Store the result in a local "conversations" variable used by the rendering logic below.
-            const conversations = [];
+            const response = await fetch(`${API_URL}/conversations`);
+            if (!response.ok) {
+                throw new Error(`Failed to load conversations: ${response.status}`);
+            }
+            const conversations = await response.json();
 
             conversationsList.innerHTML = '';
 
@@ -664,12 +663,13 @@
 
     async function loadConversation(conversationId) {
         try {
-            // TODO:
-            // Send a GET request to API_URL + "/conversations/" + conversationId.
-            // If the response is not ok, throw an error.
-            // Parse the JSON response body — it returns the full conversation object including a "messages" array.
-            // Set currentConversationId to the given conversationId.
-            // Populate conversationHistory from conversation.messages (default to empty array if missing).
+            const response = await fetch(`${API_URL}/conversations/${conversationId}`);
+            if (!response.ok) {
+                throw new Error(`Failed to load conversation: ${response.status}`);
+            }
+            const conversation = await response.json();
+            currentConversationId = conversationId;
+            conversationHistory = conversation.messages || [];
 
             updateActiveConversation();
             renderMessages();
@@ -779,9 +779,12 @@
         }
 
         try {
-            // TODO:
-            // Send a DELETE request to API_URL + "/conversations/" + conversationId.
-            // If the response is not ok, throw an error.
+            const response = await fetch(`${API_URL}/conversations/${conversationId}`, {
+                method: 'DELETE'
+            });
+            if (!response.ok) {
+                throw new Error(`Failed to delete conversation: ${response.status}`);
+            }
 
             if (conversationId === currentConversationId) {
                 currentConversationId = null;
@@ -851,69 +854,158 @@
         const typingIndicator = addMessage('assistant', '', true);
 
         try {
-            // TODO (1 — create conversation if needed):
-            // If currentConversationId is null, send a POST request to API_URL + "/conversations"
-            // with Content-Type JSON and a body containing a "title" field — use the first 50 characters
-            // of the user message, appending "..." if it exceeds 50 characters.
-            // If the response is not ok, throw an error.
-            // Parse the JSON response and set currentConversationId from the returned conversation's id.
-            // Call loadConversations() to refresh the sidebar.
+            if (!currentConversationId) {
+                const title = userMessage.length > 50 ? `${userMessage.slice(0, 50)}...` : userMessage;
+                const createResponse = await fetch(`${API_URL}/conversations`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title })
+                });
+                if (!createResponse.ok) {
+                    throw new Error(`Failed to create conversation: ${createResponse.status}`);
+                }
+                const createdConversation = await createResponse.json();
+                currentConversationId = createdConversation.id;
+                await loadConversations();
+                updateActiveConversation();
+            }
 
-            // TODO (2 — send the chat message):
-            // Send a POST request to API_URL + "/conversations/" + currentConversationId + "/chat"
-            // with Content-Type JSON and a body containing:
-            //   - message: the usermsg object (role + content)
-            //   - stream: true
-            // If the response is not ok, throw an error.
+            const response = await fetch(`${API_URL}/conversations/${currentConversationId}/chat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    message: usermsg,
+                    stream: true
+                })
+            });
+            if (!response.ok) {
+                throw new Error(`Failed to send message: ${response.status}`);
+            }
 
-            // TODO (3 — read the SSE stream):
-            // Obtain a ReadableStream reader from response.body and a TextDecoder.
-            // Declare tracking variables: assistantMessage, messageBubble, currentChunkContent (string),
-            // hasReceivedContent (bool), lastContentTime (Date.now()), pendingToolActivity (array),
-            // liveToolEl (element or null), receivedConversationId (bool).
-            //
-            // Set up a repeating interval (typingCheckInterval) every 100ms: if more than 750ms have
-            // passed since last content, content exists, and a typing indicator is not yet shown —
-            // flush currentChunkContent into conversationHistory, reset the message bubble state,
-            // and show a new typing indicator.
-            //
-            // Loop reading chunks until the reader signals done.
-            // For each chunk: decode bytes to text, split by newline, and for each line starting
-            // with "data: " extract the payload after the prefix. Then:
-            //
-            //   - If payload is "[DONE]": skip.
-            //   - Parse the payload as JSON, then handle by type:
-            //
-            //   - parsed.conversation_id (first event only): acknowledge and continue.
-            //
-            //   - parsed.error: throw an error with the error message.
-            //
-            //   - parsed.tool_activity: push the activity into pendingToolActivity.
-            //     On the first tool event, create a live indicator bubble (CSS class
-            //     "tool-calling-bubble") and append it to messagesContainer.
-            //     Update its label text: if type is "call" show "Calling <name>...",
-            //     if type is "result" show "<name> responded". Scroll to bottom.
-            //
-            //   - parsed.choices with delta.content present:
-            //     Remove currentTypingIndicator and liveToolEl if they exist.
-            //     On the first content chunk, remove the initial typingIndicator and create
-            //     a new assistant message bubble via addMessage.
-            //     Append the content to currentChunkContent, mark hasReceivedContent true,
-            //     update lastContentTime, re-render the bubble with marked.parse, scroll to bottom.
-            //
-            //   - parsed.choices with an empty delta (no content): update lastContentTime;
-            //     if no assistant bubble exists yet, create one.
-            //
-            // After the read loop ends:
-            //   - Clear typingCheckInterval.
-            //   - Remove currentTypingIndicator and liveToolEl if still present.
-            //   - If pendingToolActivity has entries, build a tool history dropdown via
-            //     createToolHistoryDropdown and insert it before the assistant message
-            //     (or append if there is none). Scroll to bottom.
-            //   - If currentChunkContent has content, push it to conversationHistory as an
-            //     assistant message object.
-            //   - If no content was ever received, remove the empty assistant message element.
-            //   - Call loadConversations() to refresh the sidebar.
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let assistantMessage = null;
+            let messageBubble = null;
+            let currentChunkContent = '';
+            let hasReceivedContent = false;
+            let lastContentTime = Date.now();
+            const pendingToolActivity = [];
+            let liveToolEl = null;
+            let receivedConversationId = false;
+            let currentTypingIndicator = null;
+
+            const typingCheckInterval = setInterval(() => {
+                if (Date.now() - lastContentTime > 750 && currentChunkContent && !currentTypingIndicator) {
+                    if (assistantMessage) {
+                        conversationHistory.push({ role: 'assistant', content: currentChunkContent });
+                        assistantMessage = null;
+                        messageBubble = null;
+                        currentChunkContent = '';
+                    }
+                    currentTypingIndicator = addMessage('assistant', '', true);
+                }
+            }, 100);
+
+            try {
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    const chunk = decoder.decode(value, { stream: true });
+                    const lines = chunk.split('\n');
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+
+                        const payload = line.slice(6);
+                        if (payload === '[DONE]') continue;
+
+                        const parsed = JSON.parse(payload);
+                        if (parsed.conversation_id && !receivedConversationId) {
+                            receivedConversationId = true;
+                            continue;
+                        }
+                        if (parsed.error) {
+                            throw new Error(parsed.error);
+                        }
+                        if (parsed.tool_activity) {
+                            pendingToolActivity.push(parsed.tool_activity);
+                            if (!liveToolEl) {
+                                liveToolEl = document.createElement('div');
+                                liveToolEl.className = 'message assistant';
+                                liveToolEl.innerHTML = `
+                                    <div class="message-bubble tool-calling-bubble">
+                                        <span class="tool-calling-spinner"></span>
+                                        <span class="tool-calling-label"></span>
+                                    </div>
+                                `;
+                                messagesContainer.appendChild(liveToolEl);
+                            }
+                            const label = liveToolEl.querySelector('.tool-calling-label');
+                            label.textContent = parsed.tool_activity.type === 'call'
+                                ? `Calling ${parsed.tool_activity.name}...`
+                                : `${parsed.tool_activity.name || 'Tool'} responded`;
+                            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                            continue;
+                        }
+
+                        const choice = parsed.choices && parsed.choices[0];
+                        const content = choice && choice.delta && choice.delta.content;
+                        if (content) {
+                            if (currentTypingIndicator) {
+                                currentTypingIndicator.remove();
+                                currentTypingIndicator = null;
+                            }
+                            if (liveToolEl) {
+                                liveToolEl.remove();
+                                liveToolEl = null;
+                            }
+                            if (!assistantMessage) {
+                                typingIndicator.remove();
+                                assistantMessage = addMessage('assistant', '', false, true);
+                                messageBubble = assistantMessage.querySelector('.message-bubble');
+                            }
+                            currentChunkContent += content;
+                            hasReceivedContent = true;
+                            lastContentTime = Date.now();
+                            messageBubble.innerHTML = marked.parse(currentChunkContent);
+                            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                            continue;
+                        }
+
+                        if (choice && choice.delta && !content) {
+                            lastContentTime = Date.now();
+                            if (!assistantMessage) {
+                                typingIndicator.remove();
+                                assistantMessage = addMessage('assistant', '', false, true);
+                                messageBubble = assistantMessage.querySelector('.message-bubble');
+                            }
+                        }
+                    }
+                }
+            } finally {
+                clearInterval(typingCheckInterval);
+            }
+
+            if (currentTypingIndicator) currentTypingIndicator.remove();
+            if (liveToolEl) liveToolEl.remove();
+
+            if (pendingToolActivity.length > 0) {
+                const dropdown = createToolHistoryDropdown(pendingToolActivity);
+                if (assistantMessage && assistantMessage.parentNode) {
+                    messagesContainer.insertBefore(dropdown, assistantMessage);
+                } else {
+                    messagesContainer.appendChild(dropdown);
+                }
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            }
+
+            if (currentChunkContent) {
+                conversationHistory.push({ role: 'assistant', content: currentChunkContent });
+            } else if (!hasReceivedContent && assistantMessage) {
+                assistantMessage.remove();
+            }
+
+            await loadConversations();
 
         } catch (error) {
             console.error('Error:', error);

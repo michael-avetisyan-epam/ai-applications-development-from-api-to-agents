@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Optional, Any
 
 from mcp import ClientSession
@@ -32,9 +33,15 @@ class StdioMcpClient(BaseMcpClient):
 
     async def connect(self):
         """Connect to MCP server via Docker"""
+        command = "docker"
+        args = ["run", "--rm", "-i", self.docker_image]
+        if os.name == "nt":
+            command = "wsl"
+            args = ["docker", "run", "--rm", "-i", self.docker_image]
+
         server_params = StdioServerParameters(
-            command="docker",
-            args=["run", "--rm", "-i", self.docker_image]
+            command=command,
+            args=args
         )
 
         logger.info("Starting Docker container for MCP", extra={"docker_image": self.docker_image})
